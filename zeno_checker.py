@@ -3,37 +3,40 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import re
 
+from networkx.algorithms import cycles
+
 #OOPing
 
 class Model:
     def __init__(self, xmlFile):
-        root = ET.parse(xmlFile)
+        self.root = ET.parse(xmlFile)
 
-        # GET DECLARATIONS
-
-        self.components = [Component(c, self) for c in root.findall("template")]
+        # GET GLOBAL DECLARATIONS
 
         self.channels = []
-        self.single_loops = []
-        self.synced_loops = []
+        self.components = [Component(c, self) for c in self.root.findall("template")]
+        self.channels = self.load_channels(self.channels)
+        
 
-        for component in self.components:
-            for cycle in component.get_cycles():
-                syncs = component.get_cycle_synchronisation(cycle)
-                if len(syncs) == 0:
-                    self.single_loops.append(cycle)
-                else:
-                    self.synced_loops.append(cycle)
+    def load_channels(self, lista):
+        output = []
+        listNames = []
+        for l in lista:
+            name = l[0].replace("?","").replace("!","").replace(" ","")
+            if not name in listNames:
+                listNames.append("name")
+                emmiterTrans=[]
+                receiverTrans=[]
+                for l2 in lista:
+                    if name in l2[0]:
+                        if "?" in l2[0]:
+                            receiverTrans.append(l2[1])
+                        elif "!" in l2[0]:
+                            emmiterTrans.append(l2[1])
+                output.append(Channel(self, name, emmiterTrans, receiverTrans))
+        return output
 
-        self.matched_loops = self.get_matched_loops()
-
-    def get_matched_loops(self):
-        loops = self.synced_loops
-
-        matched_loops = []
-        for loop in loops:
-            pass
-
+        
 class Cycle:
     def __init__(self, component, transitions):
         self.component = component
@@ -49,17 +52,23 @@ class Cycle:
             for transition in self.transitions:
                 reset = reset or transition.tests_reset(c)
                 time_req = time_req or transition.tests_time_req(c)
+                #TEST INARIANTS TOO
                 if reset and time_req:
                     return True                
         return False
+    
+    def __repr__(self):
+        return self.__str__()
 
+    def __str__(self):
+        return '['+', '.join([t.__str__() for t in self.transitions])+']'
 
 class Channel:
     def __init__(self, model, name, emmiterTrans, receiverTrans):
         self.model = model
         self.name = name
         self.elements = (emmiterTrans, receiverTrans)
-        self.broadcast = isinstance(receiverTrans, set)
+        self.broadcast = len(receiverTrans)>1
     
     def __repr__(self):
         return self.__str__()
@@ -69,7 +78,9 @@ class Channel:
 
 class Component:
     def __init__(self, compElement, model):
+        self.name = compElement.find("name").text
         self.model = model
+
         self.local_declarations = self.load_local_declarations(compElement)
         self.declarations = self.local_declarations # GET GLOBAL DECLARATIONS TOO
 
@@ -88,6 +99,13 @@ class Component:
                 except:
                     None
         self.clocks = clocks
+        self.cycles = self.get_cycles()
+    
+    def __repr__(self):
+        return self.__str__()
+
+    def __str__(self):
+        return self.name
 
     def load_locations(self, compElement):
         locations = {}
@@ -110,35 +128,46 @@ class Component:
         return graph
 
     def get_cycles(self):
-        return list(nx.simple_cycles(self.graph))
-
-    def get_cycle_transitions(self, cycle):
-        transitions = []
-        for i in range(len(cycle)):
+        cycles_l = list(nx.simple_cycles(self.graph))
+        cycles = []
+        for cycle_l in cycles_l:
+            cycle_vars = [[]]
+            for k in range(len(cycle_l)):
+                found_trans = []
+                start = cycle_l[k]
+                try:
+                    end = cycle_l[k+1]
+                except:
+                    end = cycle_l[0]
                 for transition in self.transitions:
-                    if transition.sourceId == cycle[i] and transition.targetId == cycle[(i+1) % len(cycle)]:
-                        transitions.append(transition)
-        return transitions
+                    if transition.sourceId==start and transition.targetId==end:
+                        found_trans.append(transition)
+                        new_vars = []
+                        for c in cycle_vars:
+                            if not any([f in c for f in found_trans]):
+                                c.append(transition)
+                            else:
+                                c1 = c[:-1]
+                                c1.append(transition)
+                                new_vars.append(c1)
+                        cycle_vars.extend(new_vars)
+            cycles.extend(cycle_vars)
+        return [Cycle(self, c) for c in cycles] 
 
-    def get_verified_cycles(self):
-        all_cycles = self.get_cycles()
-        return [c for c in all_cycles if self.verify_cycle(c)]
-
-    def get_cycle_synchronisation(self, cycle):
-        base_syncs = set([transition.synchronisation for transition in self.get_cycle_transitions(cycle) if transition.synchronisation])
-        syncs = set()
-        for sync in base_syncs:
-            sync = re.sub("\[.*\]","",sync)
-            sync = (sync[0:-1],sync[-1])
-            syncs.add(sync)
-            
-        return syncs
-
+    def evaluate(self, k):
+        try:
+            return int(k)
+        except:
+            for dec in self.declarations:
+                if re.match(f"(const|constant) int {k} *:?= *", dec):
+                    return int(re.split(f"(const|constant) int {k} *:?= *", dec)[-1])
 
 class Location:
     def __init__(self, locElement, component):
         self.id = locElement.attrib['id']
-        self.name = locElement.find("name").text if locElement.find("name") is not None else "noname" 
+        self.name = locElement.find("name").text if locElement.find("name") is not None else "noname"
+
+        # LOOK FOR INVARIANTS LIKE AT Transition's tests_time_req
 
     def __repr__(self):
         return self.__str__()
@@ -151,12 +180,12 @@ class Transition:
         self.sourceId = transitionElement.find("source").attrib["ref"]
         self.targetId = transitionElement.find("target").attrib["ref"]
         self.labels =  transitionElement.findall("label")
-        self.declarations = component.declarations
+        self.component = component
 
-        self.synchronisation = ""
         for label in self.labels:
             if label.attrib["kind"] == "synchronisation":
-                self.synchronisation = label.text
+                #self.component.model.load_channel(label.text)
+                self.component.model.channels.append([label.text, self])
 
     def tests_reset(self,clock):
         return any([label.attrib["kind"] == "assignment" and (f"{clock}=0" in label.text.replace(" ","")) for label in self.labels]) # add comp to :=
@@ -172,7 +201,7 @@ class Transition:
                             compared.remove(clock)
                             compared.remove("")
 
-                            if self.evaluate(compared[0].replace("(","").replace(")","")) > 0:
+                            if self.component.evaluate(compared[0].replace("(","").replace(")","")) > 0:
                                 return True
 
                         conds = [f"{clock}>", f"<{clock}"]
@@ -180,18 +209,9 @@ class Transition:
                             compared = re.split("[><=]", atom)
                             compared.remove(clock)
 
-                            if self.evaluate(compared[0]) >= 0: # add an error if evaluation returns None
+                            if self.component.evaluate(compared[0]) >= 0: # add an error if evaluation returns None
                                 return True
         return False
-        
-    def evaluate(self, k):
-        try:
-            return int(k)
-        except:
-            for dec in self.declarations:
-                if re.match(f"(const|constant) int {k} *:?= *", dec):
-                    return int(re.split(f"(const|constant) int {k} *:?= *", dec)[-1])
-
 
     def __repr__(self):
         return self.__str__()
@@ -201,40 +221,42 @@ class Transition:
 
 
 
-model = Model("fischer.xml")
+
+
+#model = Model("fischer.xml")
 model = Model("train-gate.xml")
-components = model.components
 
+for component in model.components:
+    print("---")
+    print("component:")
+    print(component)
+    print("all locations:")
+    print(component.locations)
+    print("all transitions:")
+    print(component.transitions)
 
-print("---")
-print("all locations:")
-print(components[0].locations)
-print("---")
-print("all transitions:")
-print(components[0].transitions)
+    graph = component.graph
+    print("all cycles:")
+    print(list(nx.simple_cycles(component.graph)))
+    print(component.cycles)
+    
+    print("about cycles' zenoness:")
+    for c in component.cycles:
+        print(f"cycle {c} is safe? = {c.safe}")
 
-graph = components[0].graph
-print("---")
-print("all cycles:")
-all_cycles=list(nx.simple_cycles(graph))
-print(all_cycles)
+    print("channels:")
+    for c in model.channels:
+        print(f"{c} - {c.elements}, broadcast:{c.broadcast}") # TEST AND IMPROVE
 
-print("---")
-print(nx.find_cycle(graph), all_cycles)
-print("---")
-print(components[0].verify_cycle(all_cycles[0]))
+    #print("---")
 
+    #print("---DEBUG SYNCS")
+    #components[0].get_cycle_synchronisation(components[0].get_cycles()[0])
 
-print("---")
-print("cycles satisfing sufficient condition:")
-print(components[0].get_verified_cycles())
+    #print("Synced", model.synced_loops)
+    #print("Single", model.single_loops)
+    
+    #nx.draw(component.get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
+    #plt.show()
 
-
-print("---DEBUG SYNCS")
-components[0].get_cycle_synchronisation(components[0].get_cycles()[0])
-
-print("Synced", model.synced_loops)
-print("Single", model.single_loops)
-
-#nx.draw(components[0].get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
-#plt.show()
+    
