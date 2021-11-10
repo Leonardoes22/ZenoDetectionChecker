@@ -40,7 +40,7 @@ broadcast chan alarm;
 		<init ref="id0"/>
 
 
-		
+
 		<transition>
 			<source ref="id3"/>
 			<target ref="id2"/>
@@ -62,6 +62,9 @@ broadcast chan alarm;
 			<label kind="guard" x="184" y="56">x&gt;=3</label>
 			<label kind="synchronisation" x="184" y="72">leave[id]!</label>
 		</transition>
+
+
+		
 		<transition>
 			<source ref="id0"/>
 			<target ref="id3"/>
