@@ -1,12 +1,18 @@
 import xml.etree.ElementTree as ET
 import networkx as nx
 import matplotlib.pyplot as plt
+import re
 
 class Component:
     def __init__(self, compElement):
+        self.declarations = self.load_local_declarations(compElement)
+
         self.locations = self.load_locations(compElement)
         self.initial = compElement.find("init").attrib["ref"]
         self.transitions = self.load_transitions(compElement)
+
+
+        self.graph = self.get_graph()
 
     def load_locations(self, compElement):
         locations = {}
@@ -16,7 +22,10 @@ class Component:
         return locations
 
     def load_transitions(self, compElement):
-        return [Transition(tran) for tran in compElement.findall("transition")]
+        return [Transition(tran, self.declarations) for tran in compElement.findall("transition")]
+        
+    def load_local_declarations(self, compElement):
+        return [dec.text.replace("\n","").split(";") for dec in compElement.findall("declaration")][0]
 
     def get_graph(self):
         graph = nx.MultiDiGraph()
@@ -26,25 +35,33 @@ class Component:
         return graph
 
     def get_cycles(self):
-        return list(nx.simple_cycles(self.get_graph()))
+        return list(nx.simple_cycles(self.graph))
 
     def verify_cycle(self, cycle):
-        # Suposes a single clock name x and checks for "x=0" in assignments
-        # Suposes that a ">" is sufficient
-        reset = False
-        time_req = False
-        for i in range(len(cycle)):
-            for transition in self.transitions:
-                if transition.sourceId == cycle[i] and transition.targetId == cycle[(i+1) % len(cycle)]: 
-                    #print(transition)
-                    reset = reset or transition.reset
-                    time_req = time_req or transition.time_req
-                    if reset and time_req:
-                        break
-        return reset and time_req
+        clocks = []
+        for dec in self.declarations:
+            if re.match("clock ", dec):
+                clocks = re.split(" |,", dec)[1:]
+                try:
+                    clocks.remove("")
+                except:
+                    None
+
+        for c in clocks:
+            reset = False
+            time_req = False
+            for i in range(len(cycle)):
+                for transition in self.transitions:
+                    if transition.sourceId == cycle[i] and transition.targetId == cycle[(i+1) % len(cycle)]:
+                        reset = reset or transition.tests_reset(c)
+                        time_req = time_req or transition.tests_time_req(c)
+                        if reset and time_req:
+                            return True                
+        return False
 
     def get_verified_cycles(self):
-        return [()]
+        all_cycles = self.get_cycles()
+        return [c for c in all_cycles if self.verify_cycle(c)]
 
 class Location:
     def __init__(self, locElement):
@@ -58,12 +75,56 @@ class Location:
         return self.name
 
 class Transition:
-    def __init__(self, transElement):
-        self.sourceId = transElement.find("source").attrib["ref"]
-        self.targetId = transElement.find("target").attrib["ref"]
-        labels =  transElement.findall("label")
-        self.reset = any([label.attrib["kind"] == "assignment" and ("x=0" in label.text.replace(" ","")) for label in labels])
-        self.time_req = any([label.attrib["kind"] == "guard" and ">" in label.text.replace(" ","") for label in labels])
+    def __init__(self, transitionElement, localDeclarations):
+        self.sourceId = transitionElement.find("source").attrib["ref"]
+        self.targetId = transitionElement.find("target").attrib["ref"]
+        self.labels =  transitionElement.findall("label")
+        self.declarations = localDeclarations
+        #self.reset = any([label.attrib["kind"] == "assignment" and ("x=0" in label.text.replace(" ","")) for label in labels])
+        """
+        for label in labels:
+            if label.attrib["kind"] == "guard":
+                for atom in label.text.replace(" ","").split("&&"):
+                    if ">" in atom:
+                        self.time_req = True
+                        return None
+        self.time_req = False
+        """
+        #self.time_req = any([label.attrib["kind"] == "guard" and ">" in label.text.replace(" ","") for label in labels])
+
+    def tests_reset(self,clock):
+        return any([label.attrib["kind"] == "assignment" and (f"{clock}=0" in label.text.replace(" ","")) for label in self.labels])
+
+    def tests_time_req(self,clock):
+        for label in self.labels:
+            if label.attrib["kind"] == "guard":
+                for atom in label.text.replace(" ","").split("&&"):
+                    if clock in atom:
+                        conds = [f"{clock}>=", f"<={clock}"]
+                        if any(re.match(cond, atom) for cond in conds):
+                            compared = re.split("[><=]", atom)
+                            compared.remove(clock)
+
+                            if self.evaluate(compared[0]) > 0:
+                                return True
+
+                        conds = [f"{clock}>", f"<{clock}"]
+                        if any(re.match(cond, atom) for cond in conds):
+                            compared = re.split("[><=]", atom)
+                            compared.remove(clock)
+
+                            if self.evaluate(compared[0]) >= 0:
+                                return True
+        return False
+        
+    def evaluate(self, k):
+        try:
+            return int(k)
+        except:
+            for dec in self.declarations:
+                if re.match(f"(const|constant) int {k} *= *", dec):
+                    return int(re.split(f"(const|constant) int {k} *= *", dec)[-1])
+
 
     def __repr__(self):
         return self.__str__()
@@ -75,15 +136,28 @@ root = ET.parse("fischer.xml")
 
 components = [Component(c) for c in root.findall("template")]
 
+print("---")
+print("all locations:")
 print(components[0].locations)
+print("---")
+print("all transitions:")
 print(components[0].transitions)
-#print(root.findall("template")[0].findall("location"))
 
-graph = components[0].get_graph()
-print(list(nx.simple_cycles(graph)))
-print(nx.find_cycle(graph),list(nx.simple_cycles(graph)))
-print(components[0].verify_cycle(list(nx.simple_cycles(graph))[1]))
+graph = components[0].graph
+print("---")
+print("all cycles:")
+all_cycles=list(nx.simple_cycles(graph))
+print(all_cycles)
 
-#print(graph.nodes)
-nx.draw(components[0].get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
-plt.show()
+print("---")
+print(nx.find_cycle(graph), all_cycles)
+print("---")
+print(components[0].verify_cycle(all_cycles[0]))
+
+
+print("---")
+print("cycles satisfing sufficient condition:")
+print(components[0].get_verified_cycles())
+
+#nx.draw(components[0].get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
+#plt.show()
