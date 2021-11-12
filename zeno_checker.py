@@ -3,17 +3,73 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import re
 
-#OOPing
-
 class Model:
     def __init__(self, xmlFile):
         self.root = ET.parse(xmlFile)
 
-        # GET GLOBAL DECLARATIONS
         self.channels = []
-        self.components = [Component(c, self) for c in self.root.findall("template")]
         self.global_declarations = self.load_global_declarations()
+        self.components = [Component(c, self) for c in self.root.findall("template")]
         self.channels = self.load_channels(self.channels)
+
+
+    def evaluate_match(self,match):
+        if match[1]:
+            return match[0][0].safe
+        else:
+            return any([loop.safe for loop in match[0]])
+
+    def get_matched_loops(self):
+        matched_loops = []
+        for c in self.channels:
+            for emitter_trans in c.elements[0]:
+                for emitter_loop in self.get_loops(emitter_trans):
+                    match = [emitter_loop]
+                    all_matches = []
+                    for receiver_trans in c.elements[1]:
+                        for receiver_loop in self.get_loops(receiver_trans):
+                            if not (receiver_loop.component is emitter_loop.component):
+                                missed = []
+                                if not any([receiver_loop.component is n.component for n in match]):
+                                    match.append(receiver_loop)
+                                else:
+                                    missed.append(receiver_loop)
+                                matches = [match]
+                                for mis in missed:
+                                    matched2 = []
+                                    for n in matches:
+                                        matched2 = [mis if mis.component is m.component else m for m in n]
+                                    matches.append(matched2)
+                                    all_matches.extend(matches)
+
+                    if len(all_matches) == 0 and c.broadcast:
+                        matched_loops.append((match, True))
+
+                    for m in all_matches:
+                        matched_loops.append((m,c.broadcast))
+        return matched_loops
+
+    def get_single_loops(self):
+        matched_loops = set()
+        for match in self.get_matched_loops():
+            for loop in match[0]:
+                matched_loops.add(loop)
+        
+        
+        loops = set()
+        for c in self.components:
+            for loop in c.cycles:
+                loops.add(loop)
+
+        return loops-matched_loops
+    def get_loops(self, transition):
+        loops = []  
+        for c in self.components:
+            for loop in c.cycles:
+                for t in loop.transitions:
+                    if t is transition:
+                        loops.append(loop)
+        return loops
 
 
     def load_global_declarations(self):
@@ -103,7 +159,7 @@ class Component:
         self.model = model
 
         self.local_declarations = self.load_local_declarations(compElement)
-        self.declarations = self.local_declarations # GET GLOBAL DECLARATIONS TOO
+        self.declarations = self.local_declarations + self.model.global_declarations
 
         self.locations = self.load_locations(compElement)
         self.initial = compElement.find("init").attrib["ref"]
@@ -180,8 +236,8 @@ class Component:
             return int(k)
         except:
             for dec in self.declarations:
-                if re.match(f"(const|constant) int {k} *:?= *", dec):
-                    return int(re.split(f"(const|constant) int {k} *:?= *", dec)[-1])
+                if re.match(f"(const|constant) +int +{k} *:?= *", dec):
+                    return int(re.split(f"(const|constant) +int +{k} *:?= *", dec)[-1])
 
 class Location:
     def __init__(self, locElement, component):
@@ -228,7 +284,6 @@ class Transition:
 
         for label in self.labels:
             if label.attrib["kind"] == "synchronisation":
-                #self.component.model.load_channel(label.text)
                 self.component.model.channels.append([label.text, self])
 
     def tests_reset(self,clock):
@@ -257,63 +312,62 @@ class Transition:
                                 return True
         return False
 
+    
     def __repr__(self):
         return self.__str__()
 
     def __str__(self):
-        return  f'{self.sourceId} --> {self.targetId}'
+        return  f'{self.component.locations[self.sourceId]} --> {self.component.locations[self.targetId]}'
+    
 
 
+file = "train-gate-with-random-invariant.xml"
+file = "train-gate.xml"
+file = "fischer.xml"
 
+model = Model(file)
 
+print("Started...",f"\nVerifying {file}")
 
-#model = Model("fischer.xml")
-model = Model("train-gate.xml")
-#model = Model("train-gate-with-random-invariant.xml")
+print("\n---------")
+print("Model channels:")
+print(model.channels)
+for c in model.channels:
+    print(f"{c} - emmitters: {c.elements[0]}, receivers: {c.elements[1]}, broadcast:{c.broadcast}")
 
+print("\nList of Components")
 for component in model.components:
-    print("<--------->")
-    print("component:")
-    print(component)
-    print("all locations:")
+    print("---------")
+    print("component:",component)
+    print("\nall locations:")
     print(component.locations)
-    print("all transitions:")
+    print("\nall transitions:")
     print(component.transitions)
 
-    print("---")
     graph = component.graph
-    print("all cycles:")
+    print("\nall cycles:")
     print(component.cycles)
     
-    print("about cycles' zenoness:")
-    for c in component.cycles:
-        print(f"cycle {c} is safe? = {c.safe}")
-        
-    #nx.draw(component.get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
-    #plt.show()
-    
-print("<--------->")
-print("channels:")
-for c in model.channels:
-    print(f"{c} - emmitters: {c.elements[0]}, receivers: {c.elements[1]}, broadcast:{c.broadcast}") # TEST AND IMPROVE
 
+print("\n===================\nVERIFICATION RESULTS\n===================\n")
 
+matches = model.get_matched_loops()
+singles = model.get_single_loops()
 
+unsafe = []
 
+for loop in singles:
+    if not loop.safe:
+        unsafe.append(loop)
 
+for match in matches:
+    if not model.evaluate_match(match):
+        unsafe.append(match)
 
+if len(unsafe)==0:
+    print("There are no unsafe loops, the model is non-zeno")
+else:
+    print("The checker couldn't guarantee the non-zenoness of the model. The following loops could cause zenoness:")
+    for loop in unsafe:
+        print("-->",loop)
 
-
-
-
-
-#print(model.global_declarations)
-
-#print("---")
-
-#print("---DEBUG SYNCS")
-#components[0].get_cycle_synchronisation(components[0].get_cycles()[0])
-
-#print("Synced", model.synced_loops)
-#print("Single", model.single_loops)
-    
