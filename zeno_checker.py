@@ -3,8 +3,6 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import re
 
-from networkx.algorithms import cycles
-
 #OOPing
 
 class Model:
@@ -12,10 +10,10 @@ class Model:
         self.root = ET.parse(xmlFile)
 
         # GET GLOBAL DECLARATIONS
+        self.channels = []
         self.components = [Component(c, self) for c in self.root.findall("template")]
         self.global_declarations = self.load_global_declarations()
-        self.channels = []
-        self.load_channels()
+        self.channels = self.load_channels(self.channels)
 
 
     def load_global_declarations(self):
@@ -24,7 +22,7 @@ class Model:
         return list(map(str.strip,commentless.replace("\n","").split(";")))
         
 
-    def load_channels(self):
+    def load_channels(self, lista):
         broadcast_channels = []
         simple_channels = []
         for dec in self.global_declarations:
@@ -36,35 +34,28 @@ class Model:
                     broadcast_channels = broadcast_channels + channels
                 else:
                     simple_channels = simple_channels + channels
-        print("Broadcast:",broadcast_channels)
-        print("Simple:",simple_channels)
-
-
-        #Channel(self, model, name, emmiterTrans, receiverTrans, broadcast)
-
-    '''
-    def load_channels(self, lista):
-
-        print(lista)
+        
+        channels = broadcast_channels + simple_channels
 
         output = []
         listNames = []
         for l in lista:
             name = l[0].replace("?","").replace("!","").replace(" ","")
+            name = re.sub(r"\[.*?\]","",name) # remove arrays
             if not name in listNames:
-                listNames.append("name")
-                emmiterTrans=[]
+                listNames.append(name)
+                emmitterTrans=[]
                 receiverTrans=[]
                 for l2 in lista:
                     if name in l2[0]:
                         if "?" in l2[0]:
                             receiverTrans.append(l2[1])
                         elif "!" in l2[0]:
-                            emmiterTrans.append(l2[1])
-                output.append(Channel(self, name, emmiterTrans, receiverTrans))
+                            emmitterTrans.append(l2[1])
+                broadcast = name in broadcast_channels
+                output.append(Channel(self, name, emmitterTrans, receiverTrans, broadcast))
         return output
-'''
-        
+
 class Cycle:
     def __init__(self, component, transitions):
         self.component = component
@@ -77,11 +68,13 @@ class Cycle:
         for c in clocks:
             reset = False
             time_req = False
+            time_inv = False
             for transition in self.transitions:
                 reset = reset or transition.tests_reset(c)
                 time_req = time_req or transition.tests_time_req(c)
-                #TEST INARIANTS TOO
-                if reset and time_req:
+                targetLoc = [self.component.locations[l] for l in self.component.locations if transition.targetId==l][0]
+                time_inv = time_inv or targetLoc.tests_time_inv(c)
+                if reset and (time_req or time_inv):
                     return True                
         return False
     
@@ -92,10 +85,10 @@ class Cycle:
         return '['+', '.join([t.__str__() for t in self.transitions])+']'
 
 class Channel:
-    def __init__(self, model, name, emmiterTrans, receiverTrans, broadcast):
+    def __init__(self, model, name, emmitterTrans, receiverTrans, broadcast):
         self.model = model
         self.name = name
-        self.elements = (emmiterTrans, receiverTrans)
+        self.elements = (emmitterTrans, receiverTrans)
         self.broadcast = broadcast
     
     def __repr__(self):
@@ -194,14 +187,37 @@ class Location:
     def __init__(self, locElement, component):
         self.id = locElement.attrib['id']
         self.name = locElement.find("name").text if locElement.find("name") is not None else "noname"
-
-        # LOOK FOR INVARIANTS LIKE AT Transition's tests_time_req
+        self.labels =  locElement.findall("label")
+        self.component = component
 
     def __repr__(self):
         return self.__str__()
 
     def __str__(self):
         return self.name
+
+    def tests_time_inv(self,clock):
+        for label in self.labels:
+            if label.attrib["kind"] == "invariant":
+                for atom in label.text.replace(" ","").split("&&"):
+                    if clock in atom:
+                        conds = [f"{clock}>=", f"<={clock}"]
+                        if any(re.match(cond, atom) for cond in conds):
+                            compared = re.split("[><=]", atom)
+                            compared.remove(clock)
+                            compared.remove("")
+
+                            if self.component.evaluate(compared[0].replace("(","").replace(")","")) > 0:
+                                return True
+
+                        conds = [f"{clock}>", f"<{clock}"]
+                        if any(re.match(cond, atom) for cond in conds):
+                            compared = re.split("[><=]", atom)
+                            compared.remove(clock)
+
+                            if self.component.evaluate(compared[0]) >= 0: # add an error if evaluation returns None
+                                return True
+        return False
 
 class Transition:
     def __init__(self, transitionElement, component):
@@ -210,12 +226,10 @@ class Transition:
         self.labels =  transitionElement.findall("label")
         self.component = component
 
-        '''
         for label in self.labels:
             if label.attrib["kind"] == "synchronisation":
                 #self.component.model.load_channel(label.text)
-               self.component.model.channels.append([label.text, self])
-        '''
+                self.component.model.channels.append([label.text, self])
 
     def tests_reset(self,clock):
         return any([label.attrib["kind"] == "assignment" and (f"{clock}=0" in label.text.replace(" ","")) for label in self.labels]) # add comp to :=
@@ -255,12 +269,10 @@ class Transition:
 
 #model = Model("fischer.xml")
 model = Model("train-gate.xml")
+#model = Model("train-gate-with-random-invariant.xml")
 
-#print(model.global_declarations)
-print("STOP")
-'''
 for component in model.components:
-    print("---")
+    print("<--------->")
     print("component:")
     print(component)
     print("all locations:")
@@ -268,28 +280,40 @@ for component in model.components:
     print("all transitions:")
     print(component.transitions)
 
+    print("---")
     graph = component.graph
     print("all cycles:")
-    print(list(nx.simple_cycles(component.graph)))
     print(component.cycles)
     
     print("about cycles' zenoness:")
     for c in component.cycles:
         print(f"cycle {c} is safe? = {c.safe}")
-
-    print("channels:")
-    for c in model.channels:
-        print(f"{c} - {c.elements}, broadcast:{c.broadcast}") # TEST AND IMPROVE
-
-    #print("---")
-
-    #print("---DEBUG SYNCS")
-    #components[0].get_cycle_synchronisation(components[0].get_cycles()[0])
-
-    #print("Synced", model.synced_loops)
-    #print("Single", model.single_loops)
-    
+        
     #nx.draw(component.get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
     #plt.show()
+    
+print("<--------->")
+print("channels:")
+for c in model.channels:
+    print(f"{c} - emmitters: {c.elements[0]}, receivers: {c.elements[1]}, broadcast:{c.broadcast}") # TEST AND IMPROVE
 
-    '''
+
+
+
+
+
+
+
+
+
+
+#print(model.global_declarations)
+
+#print("---")
+
+#print("---DEBUG SYNCS")
+#components[0].get_cycle_synchronisation(components[0].get_cycles()[0])
+
+#print("Synced", model.synced_loops)
+#print("Single", model.single_loops)
+    
