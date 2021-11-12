@@ -12,13 +12,41 @@ class Model:
         self.root = ET.parse(xmlFile)
 
         # GET GLOBAL DECLARATIONS
-
-        self.channels = []
         self.components = [Component(c, self) for c in self.root.findall("template")]
-        self.channels = self.load_channels(self.channels)
+        self.global_declarations = self.load_global_declarations()
+        self.channels = []
+        self.load_channels()
+
+
+    def load_global_declarations(self):
+        raw = self.root.find("declaration").text
+        commentless = re.sub(r"\/\/.*|\/\*(.|\n)*?\*\/","",raw) # remove comments
+        return list(map(str.strip,commentless.replace("\n","").split(";")))
         
 
+    def load_channels(self):
+        broadcast_channels = []
+        simple_channels = []
+        for dec in self.global_declarations:
+            if bool(re.search(r"\bchan\b",dec)):
+                parsed = dec.split("chan")
+                channels = re.sub(r"\[.*?\]","",parsed[1]) # remove arrays
+                channels = list(map(str.strip,channels.split(","))) # clean spaces
+                if "broadcast" in parsed[0]: # check if broadcast
+                    broadcast_channels = broadcast_channels + channels
+                else:
+                    simple_channels = simple_channels + channels
+        print("Broadcast:",broadcast_channels)
+        print("Simple:",simple_channels)
+
+
+        #Channel(self, model, name, emmiterTrans, receiverTrans, broadcast)
+
+    '''
     def load_channels(self, lista):
+
+        print(lista)
+
         output = []
         listNames = []
         for l in lista:
@@ -35,7 +63,7 @@ class Model:
                             emmiterTrans.append(l2[1])
                 output.append(Channel(self, name, emmiterTrans, receiverTrans))
         return output
-
+'''
         
 class Cycle:
     def __init__(self, component, transitions):
@@ -64,11 +92,11 @@ class Cycle:
         return '['+', '.join([t.__str__() for t in self.transitions])+']'
 
 class Channel:
-    def __init__(self, model, name, emmiterTrans, receiverTrans):
+    def __init__(self, model, name, emmiterTrans, receiverTrans, broadcast):
         self.model = model
         self.name = name
         self.elements = (emmiterTrans, receiverTrans)
-        self.broadcast = len(receiverTrans)>1
+        self.broadcast = broadcast
     
     def __repr__(self):
         return self.__str__()
@@ -182,10 +210,12 @@ class Transition:
         self.labels =  transitionElement.findall("label")
         self.component = component
 
+        '''
         for label in self.labels:
             if label.attrib["kind"] == "synchronisation":
                 #self.component.model.load_channel(label.text)
-                self.component.model.channels.append([label.text, self])
+               self.component.model.channels.append([label.text, self])
+        '''
 
     def tests_reset(self,clock):
         return any([label.attrib["kind"] == "assignment" and (f"{clock}=0" in label.text.replace(" ","")) for label in self.labels]) # add comp to :=
@@ -226,6 +256,9 @@ class Transition:
 #model = Model("fischer.xml")
 model = Model("train-gate.xml")
 
+#print(model.global_declarations)
+print("STOP")
+'''
 for component in model.components:
     print("---")
     print("component:")
@@ -259,4 +292,4 @@ for component in model.components:
     #nx.draw(component.get_graph(),with_labels=True, connectionstyle='arc3, rad = 0.1')
     #plt.show()
 
-    
+    '''
